@@ -1,6 +1,5 @@
 import {
   useEffect,
-  useLayoutEffect,
   useRef,
   useCallback,
   useState,
@@ -454,53 +453,6 @@ interface EditorProps {
  * Blocks are separated by blank lines, with awareness of code fences
  * and ATX headings.
  */
-function getMarkdownBlockOffsets(md: string): number[] {
-  const offsets: number[] = [];
-  const lines = md.split("\n");
-  let pos = 0;
-  let prevBlank = true; // treat doc start as preceded by blank
-  let inCodeFence = false;
-
-  for (const line of lines) {
-    const trimmed = line.trimStart();
-
-    if (inCodeFence) {
-      // Only look for closing fence; don't start new blocks inside code
-      if (trimmed.startsWith("```")) {
-        inCodeFence = false;
-      }
-    } else if (trimmed.startsWith("```")) {
-      // Opening fence is always a block start
-      offsets.push(pos);
-      inCodeFence = true;
-      prevBlank = false;
-    } else {
-      const isBlank = trimmed === "";
-      // Start a new block after a blank line, or for ATX headings
-      if (!isBlank && (prevBlank || trimmed.startsWith("#"))) {
-        offsets.push(pos);
-      }
-      prevBlank = isBlank;
-    }
-
-    pos += line.length + 1;
-  }
-
-  return offsets;
-}
-
-/** ProseMirror position at the start of the Nth top-level block. */
-function blockIndexToPos(
-  doc: { childCount: number; child: (i: number) => { nodeSize: number } },
-  blockIndex: number,
-): number {
-  const idx = Math.max(0, Math.min(blockIndex, doc.childCount - 1));
-  let pos = 1; // 1 for doc opening token
-  for (let i = 0; i < idx; i++) {
-    pos += doc.child(i).nodeSize;
-  }
-  return pos;
-}
 
 export function Editor({
   onToggleSidebar,

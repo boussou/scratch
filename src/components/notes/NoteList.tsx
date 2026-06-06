@@ -192,6 +192,10 @@ function buildFolderTree(items: DisplayItem[], folderPaths: string[]): FolderTre
 }
 
 interface NoteListProps {
+  multiSelectedNoteIds?: Set<string>;
+  setMultiSelectedNoteIds?: (ids: Set<string>) => void;
+  lastClickedNoteId?: string | null;
+  setLastClickedNoteId?: (id: string | null) => void;
   focusSignal?: number;
   toggleAllFoldersSignal?: number;
   onFolderTreeStateChange?: (allExpanded: boolean) => void;
@@ -199,6 +203,10 @@ interface NoteListProps {
 }
 
 export function NoteList({
+  multiSelectedNoteIds: _multiSelectedNoteIds = new Set(),
+  setMultiSelectedNoteIds: _setMultiSelectedNoteIds,
+  lastClickedNoteId: _lastClickedNoteId,
+  setLastClickedNoteId: _setLastClickedNoteId,
   focusSignal = 0,
   toggleAllFoldersSignal = 0,
   onFolderTreeStateChange,

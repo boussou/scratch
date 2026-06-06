@@ -233,7 +233,7 @@ export function NotesProvider({
   const createFolder = useCallback(
     async (parentPath: string | null, name: string) => {
       try {
-        await notesService.createFolder(parentPath, name);
+        await notesService.createFolderWithName(parentPath, name);
         await Promise.all([refreshNotes(), refreshFolders()]);
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to create folder");
@@ -696,7 +696,7 @@ export function NotesProvider({
   );
 
   // Missing functions from HEAD - add stub implementations
-  const consumePendingNewNote = useCallback((id: string) => {
+  const consumePendingNewNote = useCallback((_id: string) => {
     // Stub: always return false for now
     return false;
   }, []);

@@ -61,10 +61,6 @@ export async function createNote(targetFolder?: string): Promise<Note> {
   return invoke("create_note", { targetFolder: targetFolder ?? null });
 }
 
-export async function listFolders(): Promise<string[]> {
-  return invoke("list_folders");
-}
-
 export async function createFolder(path: string): Promise<void> {
   return invoke("create_folder", { path });
 }
@@ -89,7 +85,7 @@ export async function createNoteInFolder(parentPath: string): Promise<Note> {
   return invoke("create_note_in_folder", { parentPath });
 }
 
-export async function createFolder(
+export async function createFolderWithName(
   parentPath: string | null,
   name: string
 ): Promise<string> {

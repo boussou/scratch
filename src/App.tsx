@@ -19,7 +19,6 @@ import {
   SpinnerIcon,
   ClaudeIcon,
   CodexIcon,
-  OpenCodeIcon,
   OllamaIcon,
 } from "./components/icons";
 import { AiEditModal } from "./components/ai/AiEditModal";
