@@ -56,9 +56,56 @@ Download the latest `.exe` installer from [Releases](https://github.com/erictli/
 
 ### Linux
 
-Download the latest `.AppImage` or `.deb` from [Releases](https://github.com/erictli/scratch/releases).
+#### Arch Linux (AUR)
 
-### From Source
+```bash
+# Install from AUR using an AUR helper (e.g., yay, paru)
+yay -S scratch-notes
+
+# Or build manually from source
+git clone https://aur.archlinux.org/scratch-notes.git
+cd scratch-notes
+makepkg -si
+```
+
+#### Debian/Ubuntu
+
+Download the latest `.deb` from [Releases](https://github.com/erictli/scratch/releases) and install:
+
+```bash
+sudo dpkg -i Scratch_*.deb
+```
+
+#### Other Linux distributions
+
+Download the latest `.AppImage` from [Releases](https://github.com/erictli/scratch/releases), make it executable, and run:
+
+```bash
+chmod +x Scratch.AppImage
+./Scratch.AppImage
+```
+
+### From Source (Arch Linux)
+
+**Prerequisites:** `base-devel`, `rustup`, `npm`, `webkit2gtk-4.1`
+
+```bash
+# Install dependencies
+sudo pacman -S base-devel rustup npm webkit2gtk-4.1 gtk3 libsoup3
+
+# Build using Makefile
+git clone https://github.com/erictli/scratch.git
+cd scratch
+make build
+
+# Or run in development mode
+make dev
+
+# Install system-wide (optional)
+sudo make install
+```
+
+### From Source (Other Platforms)
 
 **Prerequisites:** Node.js 18+, Rust 1.70+
 
