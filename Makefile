@@ -2,14 +2,13 @@
 
 PKG_NAME := scratch-notes
 PKG_DIR  := src-tauri
-VERSION  := $(shell grep '^pkgver' $(PKG_DIR)/PKGBUILD | cut -d= -f2)
+VERSION  := $(shell grep '"version"' $(PKG_DIR)/tauri.conf.json | cut -d: -f2 | tr -d ' ,"' | head -1)
 
 # Build the application (frontend + backend, no bundler)
 build:
 	@echo "Building $(PKG_NAME) $(VERSION)..."
-	cd $(PKG_DIR) && npm install --ignore-scripts
-	npm run build
-	cd $(PKG_DIR) && cargo build --release --locked
+	npm install
+	npx tauri build
 	@echo "Build complete! Binary at src-tauri/target/release/Scratch"
 
 # Run in development mode
@@ -63,7 +62,7 @@ bundle:
 
 # Clean build artifacts
 clean:
-	cargo clean
+	cd $(PKG_DIR) && cargo clean
 	rm -rf node_modules dist
 	rm -rf src-tauri/target src-tauri/AppDir
 

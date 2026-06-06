@@ -39,7 +39,7 @@
   "bundle": {
     "active": true,
     "targets": ["deb", "rpm"],
-    "createUpdaterArtifacts": true,
+    "createUpdaterArtifacts": false,
     "fileAssociations": [
       {
         "ext": ["md", "markdown"],
