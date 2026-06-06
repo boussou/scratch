@@ -10,7 +10,7 @@ import {
   type DragStartEvent,
   type DragEndEvent,
 } from "@dnd-kit/core";
-import { useNotes } from "../../context/NotesContext";
+import { useNotesActions, useNotesData } from "../../context/NotesContext";
 import { NoteList } from "../notes/NoteList";
 import { Footer } from "./Footer";
 import { IconButton, Input } from "../ui";
@@ -22,6 +22,8 @@ import {
   AddNoteIcon,
   FolderPlusIcon,
   NoteIcon,
+  ChevronDownIcon,
+  ChevronUpIcon,
 } from "../icons";
 import { mod, shift, isMac } from "../../lib/platform";
 import * as notesService from "../../services/notes";
@@ -29,21 +31,24 @@ import { FolderNameDialog } from "../notes/FolderNameDialog";
 
 interface SidebarProps {
   onOpenSettings?: () => void;
+  openSearchSignal?: number;
+  focusNoteListSignal?: number;
+  toggleAllFoldersSignal?: number;
+  onToggleAllFolders?: () => void;
 }
 
-export function Sidebar({ onOpenSettings }: SidebarProps) {
-  const {
-    createNote,
-    createFolder,
-    notes,
-    search,
-    searchQuery,
-    clearSearch,
-    selectedNoteId,
-    moveNote,
-    moveFolder,
-  } = useNotes();
+export function Sidebar({
+  onOpenSettings,
+  openSearchSignal = 0,
+  focusNoteListSignal = 0,
+  toggleAllFoldersSignal = 0,
+  onToggleAllFolders,
+}: SidebarProps) {
+  const { searchQuery, selectedNoteId } = useNotesData();
+  const { createNote, createFolder, search, clearSearch, moveNote, moveFolder } = useNotesActions();
   const [searchOpen, setSearchOpen] = useState(false);
+  const [allFoldersExpanded, setAllFoldersExpanded] = useState(false);
+  const [createRootFolderSignal, setCreateRootFolderSignal] = useState(0);
   const [inputValue, setInputValue] = useState(searchQuery);
   const [plusMenuOpen, setPlusMenuOpen] = useState(false);
   const [folderDialogOpen, setFolderDialogOpen] = useState(false);
@@ -227,22 +232,13 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
     }
   }, [searchOpen]);
 
-  // Global shortcut hook: open and focus sidebar search
   useEffect(() => {
-    const handleOpenSidebarSearch = () => {
-      setSearchOpen(true);
-      requestAnimationFrame(() => {
-        searchInputRef.current?.focus();
-      });
-    };
-
-    window.addEventListener("open-sidebar-search", handleOpenSidebarSearch);
-    return () =>
-      window.removeEventListener(
-        "open-sidebar-search",
-        handleOpenSidebarSearch,
-      );
-  }, []);
+    if (openSearchSignal === 0) return;
+    setSearchOpen(true);
+    requestAnimationFrame(() => {
+      searchInputRef.current?.focus();
+    });
+  }, [openSearchSignal]);
 
   const handleSearchKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -265,6 +261,10 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
     setInputValue("");
     clearSearch();
   }, [clearSearch]);
+
+  const handleCreateRootFolder = useCallback(() => {
+    setCreateRootFolderSignal((prev) => prev + 1);
+  }, []);
 
   const handleNewFolder = useCallback(() => {
     const lastSlash = selectedNoteId?.lastIndexOf("/") ?? -1;
@@ -314,13 +314,26 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
       {/* Drag region */}
       <div className="h-11 shrink-0" data-tauri-drag-region></div>
       <div className="flex items-center justify-between pl-4 pr-3 pb-2 border-b border-border shrink-0">
-        <div className="flex items-center gap-1">
-          <div className="font-medium text-base">Notes</div>
-          <div className="text-text-muted font-medium text-2xs min-w-4.75 h-4.75 flex items-center justify-center px-1 bg-bg-muted rounded-sm mt-0.5 pt-px">
-            {notes.length}
-          </div>
-        </div>
+        <div className="font-medium text-base">Notes</div>
         <div className="flex items-center gap-px">
+          <IconButton
+            onClick={onToggleAllFolders}
+            title="Toggle Folder Tree"
+          >
+            <div className="flex flex-col leading-none -space-y-1">
+              {allFoldersExpanded ? (
+                <>
+                  <ChevronDownIcon className="w-3.5 h-3.5 stroke-[2]" />
+                  <ChevronUpIcon className="w-3.5 h-3.5 stroke-[1.6] text-text-muted" />
+                </>
+              ) : (
+                <>
+                  <ChevronUpIcon className="w-3.5 h-3.5 stroke-[2]" />
+                  <ChevronDownIcon className="w-3.5 h-3.5 stroke-[1.6] text-text-muted" />
+                </>
+              )}
+            </div>
+          </IconButton>
           <IconButton
             onClick={toggleSearch}
             title={`Search Notes (${mod}${isMac ? "" : "+"}${shift}${isMac ? "" : "+"}F)`}
@@ -373,13 +386,22 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
               </DropdownMenu.Portal>
             </DropdownMenu.Root>
           ) : (
-            <IconButton
-              variant="ghost"
-              onClick={() => createNote()}
-              title={`New Note (${mod}${isMac ? "" : "+"}N)`}
-            >
-              <PlusIcon className="w-5.25 h-5.25 stroke-[1.4]" />
-            </IconButton>
+            <>
+              <IconButton
+                variant="ghost"
+                onClick={createNote}
+                title={`New Note (${mod}${isMac ? "" : "+"}N)`}
+              >
+                <PlusIcon className="w-5.25 h-5.25 stroke-[1.4]" />
+              </IconButton>
+              <IconButton
+                variant="ghost"
+                onClick={handleCreateRootFolder}
+                title="New Folder"
+              >
+                <FolderPlusIcon className="w-5 h-5 stroke-[1.6]" />
+              </IconButton>
+            </>
           )}
         </div>
       </div>
@@ -417,6 +439,10 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
           setMultiSelectedNoteIds={setMultiSelectedNoteIds}
           lastClickedNoteId={lastClickedNoteId}
           setLastClickedNoteId={setLastClickedNoteId}
+          focusSignal={focusNoteListSignal}
+          toggleAllFoldersSignal={toggleAllFoldersSignal}
+          onFolderTreeStateChange={setAllFoldersExpanded}
+          createRootFolderSignal={createRootFolderSignal}
         />
       </div>
 

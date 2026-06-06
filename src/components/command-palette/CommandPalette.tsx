@@ -9,13 +9,10 @@ import {
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
-import { useNotes } from "../../context/NotesContext";
+import { useNotesData, useNotesActions } from "../../context/NotesContext";
 import { useTheme } from "../../context/ThemeContext";
 import { useGit } from "../../context/GitContext";
-import * as notesService from "../../services/notes";
-import * as aiService from "../../services/ai";
 import { downloadPdf, downloadMarkdown } from "../../services/pdf";
-import type { Settings } from "../../types/note";
 import type { Editor } from "@tiptap/react";
 import {
   CommandItem,
@@ -31,6 +28,7 @@ import {
 import { cleanTitle } from "../../lib/utils";
 import { plainTextFromMarkdown } from "../../lib/plainText";
 import { duplicateNote } from "../../services/notes";
+import { insertObsidianFrontmatter } from "../editor/frontmatterUtils";
 import {
   CopyIcon,
   DownloadIcon,
@@ -50,6 +48,7 @@ import {
   FolderIcon,
   FolderPlusIcon,
   KeyboardIcon,
+  FoldersIcon,
 } from "../icons";
 import { mod, shift } from "../../lib/platform";
 import type { AiProvider } from "../../services/ai";
@@ -68,6 +67,8 @@ interface CommandPaletteProps {
   onOpenSettings?: () => void;
   onOpenShortcuts?: () => void;
   onOpenAiModal?: (provider: AiProvider) => void;
+  onToggleSourceMode?: () => void;
+  onToggleFolderTree?: () => void;
   focusMode?: boolean;
   onToggleFocusMode?: () => void;
   editorRef?: React.RefObject<Editor | null>;
@@ -79,22 +80,34 @@ export function CommandPalette({
   onOpenSettings,
   onOpenShortcuts,
   onOpenAiModal,
+  onToggleSourceMode,
+  onToggleFolderTree,
   focusMode,
   onToggleFocusMode,
   editorRef,
 }: CommandPaletteProps) {
   const {
     notes,
+    currentNote,
+    pinnedNoteIds,
+    notesFolder,
+    vaults,
+    recentVaults,
+    activeVault,
+  } = useNotesData();
+  const {
     selectNote,
     createNote,
     deleteNote,
-    currentNote,
     refreshNotes,
     pinNote,
     unpinNote,
-    notesFolder,
-  } = useNotes();
-  const { setTheme } = useTheme();
+    switchVault,
+    toggleFavoriteVault,
+    openVaultInNewWindow,
+    addVault,
+  } = useNotesActions();
+  const { setTheme, setEditorWidth } = useTheme();
   const { status, gitAvailable, gitEnabled, commit, sync, isSyncing } = useGit();
   const [query, setQuery] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -103,45 +116,9 @@ export function CommandPalette({
   const [localSearchResults, setLocalSearchResults] = useState<
     { id: string; title: string; preview: string; modified: number }[]
   >([]);
-  const [settings, setSettings] = useState<Settings | null>(null);
-  const [availableAiProviders, setAvailableAiProviders] = useState<
-    AiProvider[]
-  >([]);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
-  // Load settings when palette opens or current note changes
-  useEffect(() => {
-    if (open) {
-      notesService.getSettings().then(setSettings);
-    }
-  }, [open, currentNote?.id]);
-
-  useEffect(() => {
-    if (!open || !currentNote) {
-      setAvailableAiProviders([]);
-      return;
-    }
-
-    let active = true;
-    aiService
-      .getAvailableAiProviders()
-      .then((providers) => {
-        if (active) {
-          setAvailableAiProviders(providers);
-        }
-      })
-      .catch((error) => {
-        if (active) {
-          console.error("Failed to discover AI providers:", error);
-          setAvailableAiProviders([]);
-        }
-      });
-
-    return () => {
-      active = false;
-    };
-  }, [open, currentNote?.id]);
 
   // Memoize commands array
   const commands = useMemo<Command[]>(() => {
@@ -170,52 +147,7 @@ export function CommandPalette({
 
     // Add note-specific commands if a note is selected
     if (currentNote) {
-      const isPinned =
-        settings?.pinnedNoteIds?.includes(currentNote.id) || false;
-      const aiCommands: Command[] = onOpenAiModal
-        ? availableAiProviders.map((provider) => {
-            const action = () => {
-              onOpenAiModal(provider);
-              onClose();
-            };
-
-            if (provider === "codex") {
-              return {
-                id: "ai-edit-codex",
-                label: "Edit with OpenAI Codex",
-                icon: <CodexIcon className="w-4.5 h-4.5 fill-text-muted" />,
-                action,
-              };
-            }
-
-            if (provider === "opencode") {
-              return {
-                id: "ai-edit-opencode",
-                label: "Edit with OpenCode",
-                icon: (
-                  <OpenCodeIcon className="w-4.5 h-4.5 fill-text-muted" />
-                ),
-                action,
-              };
-            }
-
-            if (provider === "ollama") {
-              return {
-                id: "ai-edit-ollama",
-                label: "Edit with Ollama",
-                icon: <OllamaIcon className="w-4.5 h-4.5 fill-text-muted" />,
-                action,
-              };
-            }
-
-            return {
-              id: "ai-edit-claude",
-              label: "Edit with Claude Code",
-              icon: <ClaudeIcon className="w-4.5 h-4.5 fill-text-muted" />,
-              action,
-            };
-          })
-        : [];
+      const isPinned = pinnedNoteIds.includes(currentNote.id);
 
       baseCommands.push(
         {
@@ -236,7 +168,6 @@ export function CommandPalette({
             }
           },
         },
-        ...aiCommands,
         {
           id: "duplicate-note",
           label: "Duplicate Current Note",
@@ -262,6 +193,20 @@ export function CommandPalette({
           },
         },
         {
+          id: "reveal-current-note",
+          label: "Reveal Current Note in Finder",
+          icon: <FolderIcon className="w-4.5 h-4.5 stroke-[1.5]" />,
+          action: async () => {
+            try {
+              await invoke("open_in_file_manager", { path: currentNote.path });
+              onClose();
+            } catch (error) {
+              console.error("Failed to reveal note in file manager:", error);
+              toast.error("Failed to reveal note");
+            }
+          },
+        },
+        {
           id: "copy-markdown",
           label: "Copy Markdown",
           icon: <CopyIcon className="w-4.5 h-4.5 stroke-[1.5]" />,
@@ -274,6 +219,26 @@ export function CommandPalette({
               console.error("Failed to copy markdown:", error);
               toast.error("Failed to copy");
             }
+          },
+        },
+        {
+          id: "insert-yaml-frontmatter",
+          label: "Insert YAML Frontmatter",
+          icon: <MarkdownIcon className="w-4.5 h-4.5 stroke-[1.5]" />,
+          action: () => {
+            const editor = editorRef?.current;
+            if (!editor) {
+              toast.error("Editor not available");
+              return;
+            }
+
+            const result = insertObsidianFrontmatter(editor);
+            if (result === "exists") {
+              toast.info("Frontmatter already exists");
+            } else {
+              toast.success("Inserted YAML frontmatter");
+            }
+            onClose();
           },
         },
         {
@@ -426,7 +391,16 @@ export function CommandPalette({
         shortcut: `${mod} ${shift} M`,
         icon: <MarkdownIcon className="w-4.5 h-4.5 stroke-[1.5]" />,
         action: () => {
-          window.dispatchEvent(new CustomEvent("toggle-source-mode"));
+          onToggleSourceMode?.();
+          onClose();
+        },
+      },
+      {
+        id: "toggle-folder-tree",
+        label: "Toggle Folder Tree",
+        icon: <FoldersIcon className="w-4.5 h-4.5 stroke-[1.5]" />,
+        action: () => {
+          onToggleFolderTree?.();
           onClose();
         },
       },
@@ -448,6 +422,87 @@ export function CommandPalette({
           }
         },
       });
+
+      baseCommands.push({
+        id: "open-vault-new-window",
+        label: "Open Current Vault in New Window",
+        icon: <FoldersIcon className="w-4.5 h-4.5 stroke-[1.5]" />,
+        action: async () => {
+          try {
+            await openVaultInNewWindow(notesFolder);
+            onClose();
+          } catch (error) {
+            console.error("Failed to open vault window:", error);
+            toast.error("Failed to open vault in new window");
+          }
+        },
+      });
+
+      baseCommands.push({
+        id: "add-vault",
+        label: "Add Vault...",
+        icon: <FolderPlusIcon className="w-4.5 h-4.5 stroke-[1.5]" />,
+        action: async () => {
+          try {
+            const selected = await invoke<string | null>("open_folder_dialog", {
+              defaultPath: notesFolder || null,
+            });
+            if (selected) {
+              await addVault(selected);
+              toast.success("Vault added");
+            }
+            onClose();
+          } catch (error) {
+            console.error("Failed to add vault:", error);
+            toast.error("Failed to add vault");
+          }
+        },
+      });
+    }
+
+    if (activeVault) {
+      baseCommands.push({
+        id: "favorite-current-vault",
+        label: activeVault.isFavorite
+          ? "Unfavorite Current Vault"
+          : "Favorite Current Vault",
+        icon: <PinIcon className="w-5 h-5 stroke-[1.3]" />,
+        action: async () => {
+          try {
+            await toggleFavoriteVault(activeVault.id);
+            onClose();
+          } catch (error) {
+            console.error("Failed to update vault favorite:", error);
+            toast.error("Failed to update vault favorite");
+          }
+        },
+      });
+    }
+
+    if (vaults.length > 0) {
+      const recentIds = new Set(recentVaults.map((vault) => vault.id));
+      const orderedVaults = [
+        ...recentVaults,
+        ...vaults.filter((vault) => !recentIds.has(vault.id)),
+      ];
+
+      for (const vault of orderedVaults.slice(0, 10)) {
+        if (vault.path === notesFolder) continue;
+        baseCommands.push({
+          id: `switch-vault-${vault.id}`,
+          label: `Switch Vault: ${vault.name}${vault.isFavorite ? " ★" : ""}`,
+          icon: <FolderIcon className="w-4.5 h-4.5 stroke-[1.5]" />,
+          action: async () => {
+            try {
+              await switchVault(vault.path);
+              onClose();
+            } catch (error) {
+              console.error("Failed to switch vault:", error);
+              toast.error("Failed to switch vault");
+            }
+          },
+        });
+      }
     }
 
     // Keyboard shortcuts, settings, and theme commands at the bottom
@@ -499,6 +554,33 @@ export function CommandPalette({
           onClose();
         },
       },
+      {
+        id: "width-normal",
+        label: "Set Page Width: Default",
+        icon: <SwatchIcon className="w-4.5 h-4.5 stroke-[1.5]" />,
+        action: () => {
+          setEditorWidth("normal");
+          onClose();
+        },
+      },
+      {
+        id: "width-dynamic",
+        label: "Set Page Width: Almost Full",
+        icon: <SwatchIcon className="w-4.5 h-4.5 stroke-[1.5]" />,
+        action: () => {
+          setEditorWidth("dynamic");
+          onClose();
+        },
+      },
+      {
+        id: "width-full",
+        label: "Set Page Width: Full Width",
+        icon: <SwatchIcon className="w-4.5 h-4.5 stroke-[1.5]" />,
+        action: () => {
+          setEditorWidth("full");
+          onClose();
+        },
+      },
     );
 
     return baseCommands;
@@ -509,7 +591,8 @@ export function CommandPalette({
     onClose,
     onOpenSettings,
     onOpenAiModal,
-    availableAiProviders,
+    onToggleSourceMode,
+    onToggleFolderTree,
     setTheme,
     gitEnabled,
     gitAvailable,
@@ -519,13 +602,21 @@ export function CommandPalette({
     isSyncing,
     selectNote,
     refreshNotes,
-    settings,
+    pinnedNoteIds,
     pinNote,
     unpinNote,
     focusMode,
     onToggleFocusMode,
     notesFolder,
     onOpenShortcuts,
+    vaults,
+    recentVaults,
+    activeVault,
+    switchVault,
+    toggleFavoriteVault,
+    openVaultInNewWindow,
+    addVault,
+    setEditorWidth,
   ]);
 
   // Debounced search using Tantivy (local state, doesn't affect sidebar)

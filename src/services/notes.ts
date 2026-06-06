@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Note, NoteMetadata, Settings } from "../types/note";
+import type { Note, NoteMetadata, Settings, VaultInfo } from "../types/note";
 
 export async function getNotesFolder(): Promise<string | null> {
   return invoke("get_notes_folder");
@@ -9,8 +9,40 @@ export async function setNotesFolder(path: string): Promise<void> {
   return invoke("set_notes_folder", { path });
 }
 
+export async function listVaults(): Promise<VaultInfo[]> {
+  return invoke("list_vaults");
+}
+
+export async function listRecentVaults(limit = 10): Promise<VaultInfo[]> {
+  return invoke("list_recent_vaults", { limit });
+}
+
+export async function addVault(path: string): Promise<VaultInfo> {
+  return invoke("add_vault", { path });
+}
+
+export async function setActiveVault(path: string): Promise<void> {
+  return invoke("set_active_vault", { path });
+}
+
+export async function removeVault(vaultId: string): Promise<void> {
+  return invoke("remove_vault", { vaultId });
+}
+
+export async function toggleFavoriteVault(vaultId: string): Promise<VaultInfo> {
+  return invoke("toggle_favorite_vault", { vaultId });
+}
+
+export async function openVaultWindow(path: string): Promise<void> {
+  return invoke("open_vault_window", { path });
+}
+
 export async function listNotes(): Promise<NoteMetadata[]> {
   return invoke("list_notes");
+}
+
+export async function listFolders(): Promise<string[]> {
+  return invoke("list_folders");
 }
 
 export async function readNote(id: string): Promise<Note> {
@@ -51,6 +83,17 @@ export async function moveNote(id: string, targetFolder: string): Promise<string
 
 export async function moveFolder(path: string, targetParent: string): Promise<void> {
   return invoke("move_folder", { path, targetParent });
+}
+
+export async function createNoteInFolder(parentPath: string): Promise<Note> {
+  return invoke("create_note_in_folder", { parentPath });
+}
+
+export async function createFolder(
+  parentPath: string | null,
+  name: string
+): Promise<string> {
+  return invoke("create_folder", { parentPath, name });
 }
 
 export async function duplicateNote(id: string): Promise<Note> {

@@ -1,44 +1,58 @@
-import { useTheme, defaultThemeColors } from "../../context/ThemeContext";
-import { Button, CodeCopyButton, IconButton, Input, Select } from "../ui";
-import { ColorPicker } from "../ui/ColorPicker";
+import { useEffect, useState } from "react";
+import { useTheme } from "../../context/ThemeContext";
+import { Button, IconButton, Input, Select } from "../ui";
 import type {
   FontFamily,
   TextDirection,
   EditorWidth,
-  ThemeColorKey,
+  ThemeColors,
 } from "../../types/note";
-import { ChevronRightIcon, EyeIcon, MinusIcon, PlusIcon } from "../icons";
-import { cn } from "../../lib/utils";
-
-// Human-readable labels for theme color keys, grouped logically
-const colorLabels: { key: ThemeColorKey; label: string; group: string }[] = [
-  // Surfaces
-  { key: "bg", label: "Background", group: "Surfaces" },
-  { key: "bg-secondary", label: "Sidebar", group: "Surfaces" },
-  { key: "bg-muted", label: "Hover & Subtle Fill", group: "Surfaces" },
-  { key: "bg-emphasis", label: "Strong Fill", group: "Surfaces" },
-  // Text & UI
-  { key: "text", label: "Text", group: "Text & UI" },
-  { key: "text-muted", label: "Secondary Text", group: "Text & UI" },
-  { key: "accent", label: "Primary & Buttons", group: "Text & UI" },
-  { key: "border", label: "Borders", group: "Text & UI" },
-  { key: "selection", label: "Selection Highlight", group: "Text & UI" },
-];
+import { EyeIcon, MinusIcon, PlusIcon } from "../icons";
 
 // Text direction options
 const textDirectionOptions: { value: TextDirection; label: string }[] = [
-  { value: "auto", label: "Auto" },
   { value: "ltr", label: "LTR" },
   { value: "rtl", label: "RTL" },
 ];
 
 // Page width options
 const editorWidthOptions: { value: EditorWidth; label: string }[] = [
-  { value: "narrow", label: "Narrow" },
-  { value: "normal", label: "Normal" },
-  { value: "wide", label: "Wide" },
-  { value: "full", label: "Full" },
-  { value: "custom", label: "Custom" },
+  { value: "normal", label: "Default" },
+  { value: "dynamic", label: "Almost Full" },
+  { value: "full", label: "Full Width" },
+];
+
+const themePresetOptions = [
+  { value: "scratch", label: "Scratch" },
+  { value: "catppuccin", label: "Catppuccin" },
+  { value: "tokyo-night", label: "Tokyo Night" },
+  { value: "github", label: "GitHub" },
+  { value: "gruvbox-material", label: "Gruvbox Material" },
+  { value: "kanagawa", label: "Kanagawa" },
+  { value: "solarized", label: "Solarized" },
+  { value: "rose-pine", label: "Rose Pine" },
+  { value: "moonlight", label: "Moonlight" },
+] as const;
+
+const themeColorFields: Array<{ key: keyof ThemeColors; label: string }> = [
+  { key: "bg", label: "Background" },
+  { key: "bgSecondary", label: "Background Secondary" },
+  { key: "bgMuted", label: "Background Muted" },
+  { key: "bgEmphasis", label: "Background Emphasis" },
+  { key: "text", label: "Text" },
+  { key: "textMuted", label: "Text Muted" },
+  { key: "textInverse", label: "Text Inverse" },
+  { key: "border", label: "Border" },
+  { key: "accent", label: "Accent" },
+  { key: "link", label: "Link" },
+  { key: "linkHover", label: "Link Hover" },
+  { key: "headingH1", label: "Heading H1" },
+  { key: "headingH2", label: "Heading H2" },
+  { key: "headingH3", label: "Heading H3" },
+  { key: "headingH4", label: "Heading H4" },
+  { key: "headingH5", label: "Heading H5" },
+  { key: "headingH6", label: "Heading H6" },
+  { key: "bold", label: "Bold" },
 ];
 
 // Font family options
@@ -61,6 +75,12 @@ export function AppearanceSettingsSection() {
     theme,
     resolvedTheme,
     setTheme,
+    themePreset,
+    setThemePreset,
+    customLightColors,
+    customDarkColors,
+    setCustomThemeColor,
+    resetCustomThemeColors,
     editorFontSettings,
     setEditorFontSetting,
     resetEditorFontSettings,
@@ -70,13 +90,6 @@ export function AppearanceSettingsSection() {
     setEditorWidth,
     interfaceZoom,
     setInterfaceZoom,
-    customEditorWidthPx,
-    setCustomEditorWidthPx,
-    customColorsLight,
-    customColorsDark,
-    setCustomColor,
-    resetCustomColor,
-    resetAllCustomColors,
   } = useTheme();
 
   // Validated numeric change handler
@@ -98,9 +111,17 @@ export function AppearanceSettingsSection() {
     editorFontSettings.baseFontSize !== 15 ||
     editorFontSettings.boldWeight !== 600 ||
     editorFontSettings.lineHeight !== 1.6 ||
-    textDirection !== "auto" ||
+    textDirection !== "ltr" ||
     editorWidth !== "normal" ||
     Math.round(interfaceZoom * 100) !== 100;
+
+  const [themeEditMode, setThemeEditMode] = useState<"light" | "dark">(
+    resolvedTheme,
+  );
+
+  useEffect(() => {
+    setThemeEditMode(resolvedTheme);
+  }, [resolvedTheme]);
 
   // Filter weight options based on font family
   const isMonospace = editorFontSettings.baseFontFamily === "monospace";
@@ -140,40 +161,76 @@ export function AppearanceSettingsSection() {
             Currently using {resolvedTheme} mode based on system preference
           </p>
         )}
+      </section>
 
-        {/* Customize Colors */}
-        {theme === "system" ? (
-          <div className="mt-4 space-y-2">
-            <ColorsExpandable
-              label="Customize light colors"
-              mode="light"
-              customColors={customColorsLight}
-              setCustomColor={setCustomColor}
-              resetCustomColor={resetCustomColor}
-              resetAllCustomColors={resetAllCustomColors}
-            />
-            <ColorsExpandable
-              label="Customize dark colors"
-              mode="dark"
-              customColors={customColorsDark}
-              setCustomColor={setCustomColor}
-              resetCustomColor={resetCustomColor}
-              resetAllCustomColors={resetAllCustomColors}
-            />
+      {/* Divider */}
+      <div className="border-t border-border border-dashed" />
+
+      {/* Theme Presets + Custom */}
+      <section>
+        <div className="flex items-baseline justify-between mb-3">
+          <h2 className="text-xl font-medium">Theme Palette</h2>
+          <Button onClick={resetCustomThemeColors} variant="ghost" size="sm">
+            Reset Colors
+          </Button>
+        </div>
+
+        <div className="rounded-[10px] border border-border pl-4 py-3 pr-3 space-y-3">
+          <div className="flex items-center justify-between">
+            <label className="text-sm text-text font-medium">Preset</label>
+            <Select
+              value={themePreset === "custom" ? "scratch" : themePreset}
+              onChange={(e) =>
+                setThemePreset(
+                  e.target.value as (typeof themePresetOptions)[number]["value"],
+                )
+              }
+              className="w-40"
+            >
+              {themePresetOptions.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </Select>
           </div>
-        ) : (
-          <ColorsExpandable
-            label="Customize colors"
-            mode={resolvedTheme}
-            customColors={
-              resolvedTheme === "dark" ? customColorsDark : customColorsLight
-            }
-            setCustomColor={setCustomColor}
-            resetCustomColor={resetCustomColor}
-            resetAllCustomColors={resetAllCustomColors}
-            className="mt-4"
-          />
-        )}
+
+          <div className="flex items-center justify-between">
+            <label className="text-sm text-text font-medium">Edit Colors</label>
+            <Select
+              value={themeEditMode}
+              onChange={(e) =>
+                setThemeEditMode(e.target.value as "light" | "dark")
+              }
+              className="w-40"
+            >
+              <option value="light">Light</option>
+              <option value="dark">Dark</option>
+            </Select>
+          </div>
+
+          {themeColorFields.map((field) => {
+            const colors =
+              themeEditMode === "light" ? customLightColors : customDarkColors;
+            const value = colors[field.key] || "";
+            return (
+              <div key={field.key} className="flex items-center justify-between">
+                <label className="text-sm text-text font-medium">
+                  {field.label}
+                </label>
+                <Input
+                  type="text"
+                  value={value}
+                  onChange={(e) =>
+                    setCustomThemeColor(themeEditMode, field.key, e.target.value)
+                  }
+                  placeholder="e.g. #1e1e2e or rgba(...)"
+                  className="w-40 h-9 text-xs"
+                />
+              </div>
+            );
+          })}
+        </div>
       </section>
 
       {/* Divider */}
@@ -297,33 +354,6 @@ export function AppearanceSettingsSection() {
               ))}
             </Select>
           </div>
-          {editorWidth === "custom" && (
-            <div className="flex items-center justify-between">
-              <label className="text-sm text-text font-medium">
-                Custom Width
-              </label>
-              <div className="relative w-40 flex items-center gap-2">
-                <Input
-                  type="number"
-                  min="480"
-                  max="3840"
-                  step="10"
-                  value={customEditorWidthPx}
-                  onChange={(e) => {
-                    const parsed = parseInt(e.target.value, 10);
-                    if (Number.isFinite(parsed)) {
-                      setCustomEditorWidthPx(
-                        Math.min(Math.max(parsed, 480), 3840),
-                      );
-                    }
-                  }}
-                  className="w-full h-9 text-center [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
-                />
-                <span className="text-sm text-text-muted">px</span>
-              </div>
-            </div>
-          )}
-
           {/* Interface Zoom */}
           <div className="flex items-center justify-between">
             <label className="text-sm text-text font-medium">
@@ -409,10 +439,9 @@ export function AppearanceSettingsSection() {
                 immediately by Strategic Meowing.
               </p>
 
-              <div className="relative my-1">
-                <div className="absolute top-2 right-2 z-10">
-                  <CodeCopyButton
-                    text={`function acquireFood() {
+              <pre>
+                <code>
+                  {`function acquireFood() {
   while (bowl.isEmpty()) {
     meow();
     rubAgainstLegs();
@@ -421,22 +450,8 @@ export function AppearanceSettingsSection() {
     }
   }
 }`}
-                  />
-                </div>
-                <pre className="pt-10">
-                  <code>
-                    {`function acquireFood() {
-  while (bowl.isEmpty()) {
-    meow();
-    rubAgainstLegs();
-    if (human.isInKitchen) {
-      stareIntently();
-    }
-  }
-}`}
-                  </code>
-                </pre>
-              </div>
+                </code>
+              </pre>
 
               <h2>Common Mistakes to Avoid</h2>
               <ol>
@@ -459,84 +474,5 @@ export function AppearanceSettingsSection() {
         </div>
       </section>
     </div>
-  );
-}
-
-// Expandable subsection for customizing colors for a single theme mode
-function ColorsExpandable({
-  label,
-  mode,
-  customColors,
-  setCustomColor,
-  resetCustomColor,
-  resetAllCustomColors,
-  className,
-}: {
-  label: string;
-  mode: "light" | "dark";
-  customColors: Partial<Record<ThemeColorKey, string>>;
-  setCustomColor: (
-    mode: "light" | "dark",
-    key: ThemeColorKey,
-    value: string,
-  ) => void;
-  resetCustomColor: (mode: "light" | "dark", key: ThemeColorKey) => void;
-  resetAllCustomColors: (mode: "light" | "dark") => void;
-  className?: string;
-}) {
-  const defaults = defaultThemeColors[mode];
-  const hasAnyCustom = Object.keys(customColors).length > 0;
-
-  return (
-    <details className={cn("text-sm", className)}>
-      <summary className="cursor-pointer text-text-muted hover:text-text select-none flex items-center gap-1 font-medium">
-        <ChevronRightIcon className="w-3.5 h-3.5 stroke-2 transition-transform [[open]>&]:rotate-90" />
-        {label}
-        {hasAnyCustom && (
-          <Button
-            onClick={(e) => {
-              e.preventDefault();
-              resetAllCustomColors(mode);
-            }}
-            variant="ghost"
-            size="sm"
-            className="ml-auto"
-          >
-            Reset all
-          </Button>
-        )}
-      </summary>
-      <div className="mt-2 rounded-[10px] border border-border pl-4 py-3 pr-3 space-y-1.5">
-        {(() => {
-          let lastGroup = "";
-          return colorLabels.map(({ key, label: colorLabel, group }) => {
-            const showGroup = group !== lastGroup;
-            lastGroup = group;
-            return (
-              <div key={key}>
-                {showGroup && (
-                  <div
-                    className={`text-base text-text-muted font-medium ${key !== colorLabels[0].key ? "mt-6" : ""} mb-2.5`}
-                  >
-                    {group}
-                  </div>
-                )}
-                <div className="flex items-center justify-between">
-                  <label className="text-sm text-text font-medium">
-                    {colorLabel}
-                  </label>
-                  <ColorPicker
-                    color={customColors[key] ?? defaults[key]}
-                    defaultColor={defaults[key]}
-                    onChange={(value) => setCustomColor(mode, key, value)}
-                    onReset={() => resetCustomColor(mode, key)}
-                  />
-                </div>
-              </div>
-            );
-          });
-        })()}
-      </div>
-    </details>
   );
 }

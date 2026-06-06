@@ -9,17 +9,28 @@ import {
   type ReactNode,
 } from "react";
 import { listen } from "@tauri-apps/api/event";
-import type { Note, NoteMetadata } from "../types/note";
+import type { Note, NoteMetadata, VaultInfo } from "../types/note";
 import * as notesService from "../services/notes";
 import type { SearchResult } from "../services/notes";
+import {
+  addPinnedId,
+  removePinnedId,
+  togglePinnedId,
+  transferPinnedId,
+} from "./pinUtils";
 
 // Separate contexts to prevent unnecessary re-renders
 // Data context: changes frequently, only subscribed by components that need the data
 interface NotesDataContextValue {
   notes: NoteMetadata[];
+  folders: string[];
+  pinnedNoteIds: string[];
   selectedNoteId: string | null;
   currentNote: Note | null;
   notesFolder: string | null;
+  vaults: VaultInfo[];
+  recentVaults: VaultInfo[];
+  activeVault: VaultInfo | null;
   isLoading: boolean;
   error: string | null;
   searchQuery: string;
@@ -34,6 +45,8 @@ interface NotesActionsContextValue {
   selectNote: (id: string) => Promise<void>;
   createNote: () => Promise<void>;
   consumePendingNewNote: (id: string) => boolean;
+  createNoteInFolder: (parentPath: string) => Promise<void>;
+  createFolder: (parentPath: string | null, name: string) => Promise<void>;
   saveNote: (content: string, noteId?: string) => Promise<void>;
   deleteNote: (id: string) => Promise<void>;
   duplicateNote: (id: string) => Promise<void>;
@@ -41,12 +54,17 @@ interface NotesActionsContextValue {
   reloadCurrentNote: () => Promise<void>;
   setNotesFolder: (path: string) => Promise<void>;
   syncNotesFolder: (path: string) => Promise<void>;
+  switchVault: (path: string) => Promise<void>;
+  refreshVaults: () => Promise<void>;
+  addVault: (path: string) => Promise<void>;
+  removeVault: (vaultId: string) => Promise<void>;
+  toggleFavoriteVault: (vaultId: string) => Promise<void>;
+  openVaultInNewWindow: (path: string) => Promise<void>;
   search: (query: string) => Promise<void>;
   clearSearch: () => void;
   pinNote: (id: string) => Promise<void>;
   unpinNote: (id: string) => Promise<void>;
-  createNoteInFolder: (folderPath: string) => Promise<void>;
-  createFolder: (parentPath: string, name: string) => Promise<void>;
+  togglePinNote: (id: string) => Promise<void>;
   deleteFolder: (path: string) => Promise<void>;
   renameFolder: (oldPath: string, newName: string) => Promise<void>;
   moveNote: (id: string, targetFolder: string) => Promise<void>;
@@ -56,11 +74,21 @@ interface NotesActionsContextValue {
 const NotesDataContext = createContext<NotesDataContextValue | null>(null);
 const NotesActionsContext = createContext<NotesActionsContextValue | null>(null);
 
-export function NotesProvider({ children }: { children: ReactNode }) {
+export function NotesProvider({
+  children,
+  initialVaultPath,
+}: {
+  children: ReactNode;
+  initialVaultPath?: string | null;
+}) {
   const [notes, setNotes] = useState<NoteMetadata[]>([]);
+  const [folders, setFolders] = useState<string[]>([]);
+  const [pinnedNoteIds, setPinnedNoteIds] = useState<string[]>([]);
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
   const [currentNote, setCurrentNote] = useState<Note | null>(null);
   const [notesFolder, setNotesFolderState] = useState<string | null>(null);
+  const [vaults, setVaults] = useState<VaultInfo[]>([]);
+  const [recentVaults, setRecentVaults] = useState<VaultInfo[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
@@ -80,12 +108,21 @@ export function NotesProvider({ children }: { children: ReactNode }) {
   // Ref to access notes in search callback without re-creating it on every notes change
   const notesRef = useRef<NoteMetadata[]>([]);
   notesRef.current = notes;
-  // Monotonic counter to ignore stale async note selection responses.
-  const selectRequestIdRef = useRef(0);
   // Monotonic counter to ignore stale async search responses
   const searchRequestIdRef = useRef(0);
-  // Tracks the ID of a newly created note so Editor can focus its title.
-  const pendingNewNoteIdRef = useRef<string | null>(null);
+
+  const refreshVaults = useCallback(async () => {
+    try {
+      const [allVaults, recents] = await Promise.all([
+        notesService.listVaults(),
+        notesService.listRecentVaults(10),
+      ]);
+      setVaults(allVaults);
+      setRecentVaults(recents);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load vaults");
+    }
+  }, []);
 
   const refreshNotes = useCallback(async () => {
     if (!notesFolder) return;
@@ -94,6 +131,28 @@ export function NotesProvider({ children }: { children: ReactNode }) {
       setNotes(notesList);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load notes");
+    }
+  }, [notesFolder]);
+
+  const refreshPinnedNoteIds = useCallback(async () => {
+    try {
+      const settings = await notesService.getSettings();
+      setPinnedNoteIds(settings.pinnedNoteIds || []);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load settings");
+    }
+  }, []);
+
+  const refreshFolders = useCallback(async () => {
+    if (!notesFolder) {
+      setFolders([]);
+      return;
+    }
+    try {
+      const folderList = await notesService.listFolders();
+      setFolders(folderList);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load folders");
     }
   }, [notesFolder]);
 
@@ -109,28 +168,13 @@ export function NotesProvider({ children }: { children: ReactNode }) {
   }, [refreshNotes]);
 
   const selectNote = useCallback(async (id: string) => {
-    const requestId = ++selectRequestIdRef.current;
     try {
-      if (pendingNewNoteIdRef.current !== id) {
-        pendingNewNoteIdRef.current = null;
-      }
       // Set selected ID immediately for responsive UI
       setSelectedNoteId(id);
       setHasExternalChanges(false);
-      // Expand parent folders so the note is visible in the tree
-      const lastSlash = id.lastIndexOf("/");
-      if (lastSlash > 0) {
-        window.dispatchEvent(
-          new CustomEvent("expand-folder", {
-            detail: id.substring(0, lastSlash),
-          }),
-        );
-      }
       const note = await notesService.readNote(id);
-      if (requestId !== selectRequestIdRef.current) return;
       setCurrentNote(note);
     } catch (err) {
-      if (requestId !== selectRequestIdRef.current) return;
       setError(err instanceof Error ? err.message : "Failed to load note");
     }
   }, []);
@@ -149,17 +193,7 @@ export function NotesProvider({ children }: { children: ReactNode }) {
 
   const createNote = useCallback(async () => {
     try {
-      // Derive target folder from the selected note's parent path
-      let targetFolder: string | undefined;
-      if (selectedNoteIdRef.current) {
-        const lastSlash = selectedNoteIdRef.current.lastIndexOf("/");
-        if (lastSlash > 0) {
-          targetFolder = selectedNoteIdRef.current.substring(0, lastSlash);
-        }
-      }
-      const note = await notesService.createNote(targetFolder);
-      selectRequestIdRef.current += 1;
-      pendingNewNoteIdRef.current = note.id;
+      const note = await notesService.createNote();
       // Mark as recently saved to ignore file-change events from our own creation
       recentlySavedRef.current.add(note.id);
       await refreshNotes();
@@ -176,14 +210,38 @@ export function NotesProvider({ children }: { children: ReactNode }) {
     }
   }, [refreshNotes]);
 
-  const consumePendingNewNote = useCallback((id: string) => {
-    if (pendingNewNoteIdRef.current !== id) {
-      pendingNewNoteIdRef.current = null;
-      return false;
+  const createNoteInFolder = useCallback(async (parentPath: string) => {
+    try {
+      const note = await notesService.createNoteInFolder(parentPath);
+      recentlySavedRef.current.add(note.id);
+      await refreshNotes();
+      setCurrentNote(note);
+      setSelectedNoteId(note.id);
+      setSearchQuery("");
+      setSearchResults([]);
+      setTimeout(() => {
+        recentlySavedRef.current.delete(note.id);
+      }, 1000);
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Failed to create note in folder"
+      );
+      throw err;
     }
-    pendingNewNoteIdRef.current = null;
-    return true;
-  }, []);
+  }, [refreshNotes]);
+
+  const createFolder = useCallback(
+    async (parentPath: string | null, name: string) => {
+      try {
+        await notesService.createFolder(parentPath, name);
+        await Promise.all([refreshNotes(), refreshFolders()]);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Failed to create folder");
+        throw err;
+      }
+    },
+    [refreshNotes, refreshFolders]
+  );
 
   const saveNote = useCallback(
     async (content: string, noteId?: string) => {
@@ -207,13 +265,17 @@ export function NotesProvider({ children }: { children: ReactNode }) {
           const currentSettings = await notesService.getSettings();
           const pinnedIds = currentSettings.pinnedNoteIds || [];
           if (pinnedIds.includes(savingNoteId)) {
+            const nextPinnedIds = transferPinnedId(
+              pinnedIds,
+              savingNoteId,
+              updated.id
+            );
             const updatedSettings = {
               ...currentSettings,
-              pinnedNoteIds: pinnedIds.map((id) =>
-                id === savingNoteId ? updated.id : id
-              ),
+              pinnedNoteIds: nextPinnedIds,
             };
             await notesService.updateSettings(updatedSettings);
+            setPinnedNoteIds(nextPinnedIds);
           }
         }
 
@@ -260,11 +322,13 @@ export function NotesProvider({ children }: { children: ReactNode }) {
         const currentSettings = await notesService.getSettings();
         const pinnedIds = currentSettings.pinnedNoteIds || [];
         if (pinnedIds.includes(id)) {
+          const nextPinnedIds = removePinnedId(pinnedIds, id);
           const updatedSettings = {
             ...currentSettings,
-            pinnedNoteIds: pinnedIds.filter((pinId) => pinId !== id),
+            pinnedNoteIds: nextPinnedIds,
           };
           await notesService.updateSettings(updatedSettings);
+          setPinnedNoteIds(nextPinnedIds);
         }
 
         // Only clear selection if we're deleting the currently selected note
@@ -287,7 +351,6 @@ export function NotesProvider({ children }: { children: ReactNode }) {
     async (id: string) => {
       try {
         const newNote = await notesService.duplicateNote(id);
-        selectRequestIdRef.current += 1;
         // Mark as recently saved to ignore file-change events from our own creation
         recentlySavedRef.current.add(newNote.id);
         await refreshNotes();
@@ -310,11 +373,13 @@ export function NotesProvider({ children }: { children: ReactNode }) {
         const pinnedIds = currentSettings.pinnedNoteIds || [];
 
         if (!pinnedIds.includes(id)) {
+          const nextPinnedIds = addPinnedId(pinnedIds, id);
           const updatedSettings = {
             ...currentSettings,
-            pinnedNoteIds: [...pinnedIds, id],
+            pinnedNoteIds: nextPinnedIds,
           };
           await notesService.updateSettings(updatedSettings);
+          setPinnedNoteIds(nextPinnedIds);
           await refreshNotes();
         }
       } catch (err) {
@@ -329,12 +394,14 @@ export function NotesProvider({ children }: { children: ReactNode }) {
       try {
         const currentSettings = await notesService.getSettings();
         const pinnedIds = currentSettings.pinnedNoteIds || [];
+        const nextPinnedIds = removePinnedId(pinnedIds, id);
 
         const updatedSettings = {
           ...currentSettings,
-          pinnedNoteIds: pinnedIds.filter((pinId) => pinId !== id),
+          pinnedNoteIds: nextPinnedIds,
         };
         await notesService.updateSettings(updatedSettings);
+        setPinnedNoteIds(nextPinnedIds);
         await refreshNotes();
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to unpin note");
@@ -343,192 +410,93 @@ export function NotesProvider({ children }: { children: ReactNode }) {
     [refreshNotes]
   );
 
-  const createNoteInFolder = useCallback(
-    async (folderPath: string) => {
-      try {
-        const note = await notesService.createNote(folderPath);
-        selectRequestIdRef.current += 1;
-        pendingNewNoteIdRef.current = note.id;
-        recentlySavedRef.current.add(note.id);
-        await refreshNotes();
-        setCurrentNote(note);
-        setSelectedNoteId(note.id);
-        setSearchQuery("");
-        setSearchResults([]);
-        setTimeout(() => {
-          recentlySavedRef.current.delete(note.id);
-        }, 1000);
-      } catch (err) {
-        setError(
-          err instanceof Error ? err.message : "Failed to create note"
-        );
+  const togglePinNote = useCallback(
+    async (id: string) => {
+      const nextPinnedIds = togglePinnedId(pinnedNoteIds, id);
+      const shouldBePinned = nextPinnedIds.includes(id);
+      if (shouldBePinned) {
+        await pinNote(id);
+      } else {
+        await unpinNote(id);
       }
     },
-    [refreshNotes]
+    [pinnedNoteIds, pinNote, unpinNote]
   );
 
-  const createFolderAction = useCallback(
-    async (parentPath: string, name: string) => {
-      try {
-        const fullPath = parentPath ? `${parentPath}/${name}` : name;
-        await notesService.createFolder(fullPath);
-        await refreshNotes();
-      } catch (err) {
-        setError(
-          err instanceof Error ? err.message : "Failed to create folder"
-        );
-      }
-    },
-    [refreshNotes]
-  );
-
-  const deleteFolderAction = useCallback(
-    async (path: string) => {
-      try {
-        await notesService.deleteFolder(path);
-        // If the selected note was inside the deleted folder, clear selection
-        setSelectedNoteId((prevId) => {
-          if (prevId && prevId.startsWith(path + "/")) {
-            setCurrentNote(null);
-            return null;
-          }
-          return prevId;
-        });
-        await refreshNotes();
-      } catch (err) {
-        setError(
-          err instanceof Error ? err.message : "Failed to delete folder"
-        );
-      }
-    },
-    [refreshNotes]
-  );
-
-  const renameFolderAction = useCallback(
-    async (oldPath: string, newName: string) => {
-      try {
-        await notesService.renameFolder(oldPath, newName);
-
-        // Compute new folder path
-        const lastSlash = oldPath.lastIndexOf("/");
-        const newPath =
-          lastSlash >= 0
-            ? `${oldPath.substring(0, lastSlash)}/${newName}`
-            : newName;
-        const oldPrefix = oldPath + "/";
-        const newPrefix = newPath + "/";
-
-        // Update selectedNoteId if it was inside the renamed folder
-        setSelectedNoteId((prevId) => {
-          if (prevId && prevId.startsWith(oldPrefix)) {
-            const newId = newPrefix + prevId.substring(oldPrefix.length);
-            notesService.readNote(newId).then((note) => {
-              setCurrentNote(note);
-            }).catch((err) => {
-              setError(err instanceof Error ? err.message : "Failed to read renamed note");
-            });
-            return newId;
-          }
-          return prevId;
-        });
-
-        await refreshNotes();
-      } catch (err) {
-        setError(
-          err instanceof Error ? err.message : "Failed to rename folder"
-        );
-      }
-    },
-    [refreshNotes]
-  );
-
-  const moveNoteAction = useCallback(
-    async (id: string, targetFolder: string) => {
-      try {
-        const newId = await notesService.moveNote(id, targetFolder);
-        // Update selection if we moved the selected note
-        setSelectedNoteId((prevId) => {
-          if (prevId === id) {
-            notesService.readNote(newId).then((note) => {
-              setCurrentNote(note);
-            }).catch((err) => {
-              setError(err instanceof Error ? err.message : "Failed to read moved note");
-            });
-            return newId;
-          }
-          return prevId;
-        });
-        await refreshNotes();
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to move note");
-      }
-    },
-    [refreshNotes]
-  );
-
-  const moveFolderAction = useCallback(
-    async (path: string, targetParent: string) => {
-      try {
-        await notesService.moveFolder(path, targetParent);
-
-        // Compute new folder path
-        const folderName = path.includes("/")
-          ? path.substring(path.lastIndexOf("/") + 1)
-          : path;
-        const newPath = targetParent
-          ? `${targetParent}/${folderName}`
-          : folderName;
-        const oldPrefix = path + "/";
-        const newPrefix = newPath + "/";
-
-        // Update selectedNoteId if it was inside the moved folder
-        setSelectedNoteId((prevId) => {
-          if (prevId && prevId.startsWith(oldPrefix)) {
-            const newId = newPrefix + prevId.substring(oldPrefix.length);
-            notesService.readNote(newId).then((note) => {
-              setCurrentNote(note);
-            }).catch((err) => {
-              setError(err instanceof Error ? err.message : "Failed to read moved note");
-            });
-            return newId;
-          }
-          return prevId;
-        });
-
-        await refreshNotes();
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to move folder");
-      }
-    },
-    [refreshNotes]
-  );
+  const switchVault = useCallback(async (path: string) => {
+    try {
+      await notesService.setActiveVault(path);
+      const activePath = await notesService.getNotesFolder();
+      setNotesFolderState(activePath);
+      setSelectedNoteId(null);
+      setCurrentNote(null);
+      setSearchQuery("");
+      setSearchResults([]);
+      setHasExternalChanges(false);
+      setPinnedNoteIds([]);
+      // Start file watcher after setting folder
+      await notesService.startFileWatcher();
+      await refreshNotes();
+      await refreshFolders();
+      await refreshVaults();
+      await refreshPinnedNoteIds();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to switch vault");
+    }
+  }, [refreshNotes, refreshFolders, refreshVaults, refreshPinnedNoteIds]);
 
   const setNotesFolder = useCallback(async (path: string) => {
     try {
       await notesService.setNotesFolder(path);
-      setNotesFolderState(path);
-      // Start file watcher after setting folder
+      const activePath = await notesService.getNotesFolder();
+      setNotesFolderState(activePath);
       await notesService.startFileWatcher();
+      await refreshNotes();
+      await refreshFolders();
+      await refreshVaults();
+      await refreshPinnedNoteIds();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to set notes folder");
+    }
+  }, [refreshNotes, refreshFolders, refreshVaults, refreshPinnedNoteIds]);
+
+  const addVault = useCallback(async (path: string) => {
+    try {
+      await notesService.addVault(path);
+      await refreshVaults();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to add vault");
+    }
+  }, [refreshVaults]);
+
+  const removeVault = useCallback(async (vaultId: string) => {
+    try {
+      await notesService.removeVault(vaultId);
+      await refreshVaults();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to remove vault");
+    }
+  }, [refreshVaults]);
+
+  const toggleFavoriteVault = useCallback(async (vaultId: string) => {
+    try {
+      await notesService.toggleFavoriteVault(vaultId);
+      await refreshVaults();
     } catch (err) {
       setError(
-        err instanceof Error ? err.message : "Failed to set notes folder"
+        err instanceof Error ? err.message : "Failed to update favorite vault"
       );
     }
-  }, []);
+  }, [refreshVaults]);
 
-  // Update local state only (backend already initialized the folder).
-  // Used when the CLI sets the notes folder and emits an event.
-  const syncNotesFolder = useCallback(async (path: string) => {
+  const openVaultInNewWindow = useCallback(async (path: string) => {
     try {
-      setNotesFolderState(path);
-      setSelectedNoteId(null);
-      setCurrentNote(null);
-      const notesList = await notesService.listNotes();
-      setNotes(notesList);
-      await notesService.startFileWatcher();
+      await notesService.openVaultWindow(path);
     } catch (err) {
       setError(
-        err instanceof Error ? err.message : "Failed to sync notes folder"
+        err instanceof Error
+          ? err.message
+          : "Failed to open vault in new window"
       );
     }
   }, []);
@@ -601,11 +569,18 @@ export function NotesProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     async function init() {
       try {
-        const folder = await notesService.getNotesFolder();
-        setNotesFolderState(folder);
-        if (folder) {
+        if (initialVaultPath) {
+          await notesService.setActiveVault(initialVaultPath);
+        }
+        const resolvedFolder = await notesService.getNotesFolder();
+        setNotesFolderState(resolvedFolder);
+        await refreshVaults();
+        if (resolvedFolder) {
           const notesList = await notesService.listNotes();
+          const folderList = await notesService.listFolders();
           setNotes(notesList);
+          setFolders(folderList);
+          await refreshPinnedNoteIds();
           // Start file watcher
           await notesService.startFileWatcher();
         }
@@ -616,7 +591,7 @@ export function NotesProvider({ children }: { children: ReactNode }) {
       }
     }
     init();
-  }, []);
+  }, [initialVaultPath, refreshVaults, refreshPinnedNoteIds]);
 
   // Listen for file change events and notify if current note changed externally
   useEffect(() => {
@@ -677,16 +652,22 @@ export function NotesProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (notesFolder) {
       refreshNotes();
+      refreshFolders();
     }
-  }, [notesFolder, refreshNotes]);
+  }, [notesFolder, refreshNotes, refreshFolders]);
 
   // Memoize data context value to prevent unnecessary re-renders
   const dataValue = useMemo<NotesDataContextValue>(
     () => ({
       notes,
+      folders,
+      pinnedNoteIds,
       selectedNoteId,
       currentNote,
       notesFolder,
+      vaults,
+      recentVaults,
+      activeVault: vaults.find((vault) => vault.path === notesFolder) || null,
       isLoading,
       error,
       searchQuery,
@@ -697,9 +678,13 @@ export function NotesProvider({ children }: { children: ReactNode }) {
     }),
     [
       notes,
+      folders,
+      pinnedNoteIds,
       selectedNoteId,
       currentNote,
       notesFolder,
+      vaults,
+      recentVaults,
       isLoading,
       error,
       searchQuery,
@@ -710,12 +695,44 @@ export function NotesProvider({ children }: { children: ReactNode }) {
     ]
   );
 
+  // Missing functions from HEAD - add stub implementations
+  const consumePendingNewNote = useCallback((id: string) => {
+    // Stub: always return false for now
+    return false;
+  }, []);
+
+  const syncNotesFolder = useCallback(async (path: string) => {
+    await setNotesFolder(path);
+  }, [setNotesFolder]);
+
+  const deleteFolder = useCallback(async (path: string) => {
+    await notesService.deleteFolder(path);
+    await refreshNotes();
+  }, [refreshNotes]);
+
+  const renameFolder = useCallback(async (oldPath: string, newName: string) => {
+    await notesService.renameFolder(oldPath, newName);
+    await refreshNotes();
+  }, [refreshNotes]);
+
+  const moveNote = useCallback(async (id: string, targetFolder: string) => {
+    await notesService.moveNote(id, targetFolder);
+    await refreshNotes();
+  }, [refreshNotes]);
+
+  const moveFolder = useCallback(async (path: string, targetParent: string) => {
+    await notesService.moveFolder(path, targetParent);
+    await refreshNotes();
+  }, [refreshNotes]);
+
   // Memoize actions context value - these are stable callbacks
   const actionsValue = useMemo<NotesActionsContextValue>(
     () => ({
       selectNote,
       createNote,
       consumePendingNewNote,
+      createNoteInFolder,
+      createFolder,
       saveNote,
       deleteNote,
       duplicateNote,
@@ -723,21 +740,28 @@ export function NotesProvider({ children }: { children: ReactNode }) {
       reloadCurrentNote,
       setNotesFolder,
       syncNotesFolder,
+      switchVault,
+      refreshVaults,
+      addVault,
+      removeVault,
+      toggleFavoriteVault,
+      openVaultInNewWindow,
       search,
       clearSearch,
       pinNote,
       unpinNote,
-      createNoteInFolder,
-      createFolder: createFolderAction,
-      deleteFolder: deleteFolderAction,
-      renameFolder: renameFolderAction,
-      moveNote: moveNoteAction,
-      moveFolder: moveFolderAction,
+      togglePinNote,
+      deleteFolder,
+      renameFolder,
+      moveNote,
+      moveFolder,
     }),
     [
       selectNote,
       createNote,
       consumePendingNewNote,
+      createNoteInFolder,
+      createFolder,
       saveNote,
       deleteNote,
       duplicateNote,
@@ -745,16 +769,21 @@ export function NotesProvider({ children }: { children: ReactNode }) {
       reloadCurrentNote,
       setNotesFolder,
       syncNotesFolder,
+      switchVault,
+      refreshVaults,
+      addVault,
+      removeVault,
+      toggleFavoriteVault,
+      openVaultInNewWindow,
       search,
       clearSearch,
       pinNote,
       unpinNote,
-      createNoteInFolder,
-      createFolderAction,
-      deleteFolderAction,
-      renameFolderAction,
-      moveNoteAction,
-      moveFolderAction,
+      togglePinNote,
+      deleteFolder,
+      renameFolder,
+      moveNote,
+      moveFolder,
     ]
   );
 

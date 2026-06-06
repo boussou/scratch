@@ -1,9 +1,19 @@
-import { useCallback, useMemo, memo, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useMemo,
+  memo,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { invoke } from "@tauri-apps/api/core";
-import * as ContextMenu from "@radix-ui/react-context-menu";
-import { useNotes } from "../../context/NotesContext";
+import { Menu, MenuItem, PredefinedMenuItem } from "@tauri-apps/api/menu";
+import { toast } from "sonner";
+import { useNotesData, useNotesActions } from "../../context/NotesContext";
 import {
   ListItem,
+  Input,
   AlertDialog,
   AlertDialogAction,
   AlertDialogCancel,
@@ -13,25 +23,15 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "../ui";
+import { ChevronDownIcon, ChevronRightIcon, FolderIcon } from "../icons";
 import { cleanTitle } from "../../lib/utils";
-import * as notesService from "../../services/notes";
-import { FolderTreeView } from "./FolderTreeView";
-import {
-  PinIcon,
-  CopyIcon,
-  TrashIcon,
-} from "../icons";
-import type { Settings } from "../../types/note";
-
-const menuItemClass =
-  "px-3 py-1.5 text-sm text-text cursor-pointer outline-none hover:bg-bg-muted focus:bg-bg-muted flex items-center gap-2 rounded-sm";
-
-const menuSeparatorClass = "h-px bg-border my-1";
+import { getDisplayItems } from "../../lib/noteSelectors";
 
 function formatDate(timestamp: number): string {
   const date = new Date(timestamp * 1000);
   const now = new Date();
 
+  // Get start of today, yesterday, etc. (midnight local time)
   const startOfToday = new Date(
     now.getFullYear(),
     now.getMonth(),
@@ -39,23 +39,31 @@ function formatDate(timestamp: number): string {
   );
   const startOfYesterday = new Date(startOfToday.getTime() - 86400000);
 
+  // Today: show time
   if (date >= startOfToday) {
     return date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
   }
+
+  // Yesterday
   if (date >= startOfYesterday) {
     return "Yesterday";
   }
 
+  // Calculate days ago
   const daysAgo =
     Math.floor((startOfToday.getTime() - date.getTime()) / 86400000) + 1;
+
+  // 2-6 days ago: show "X days ago"
   if (daysAgo <= 6) {
     return `${daysAgo} days ago`;
   }
 
+  // This year: show month and day
   if (date.getFullYear() === now.getFullYear()) {
     return date.toLocaleDateString([], { month: "short", day: "numeric" });
   }
 
+  // Different year: show full date
   return date.toLocaleDateString([], {
     month: "short",
     day: "numeric",
@@ -63,7 +71,7 @@ function formatDate(timestamp: number): string {
   });
 }
 
-// Memoized note item component (used in flat list)
+// Memoized note item component
 interface NoteItemProps {
   id: string;
   title: string;
@@ -72,11 +80,11 @@ interface NoteItemProps {
   isSelected: boolean;
   isPinned: boolean;
   onSelect: (id: string) => void;
-  depth?: number;
+  onContextMenu: (e: React.MouseEvent, id: string) => void;
   showFolderPrefix?: boolean;
 }
 
-export const NoteItem = memo(function NoteItem({
+const NoteItem = memo(function NoteItem({
   id,
   title,
   preview,
@@ -84,193 +92,154 @@ export const NoteItem = memo(function NoteItem({
   isSelected,
   isPinned,
   onSelect,
-  depth,
+  onContextMenu,
   showFolderPrefix = true,
 }: NoteItemProps) {
-  const ref = useRef<HTMLDivElement>(null);
   const handleClick = useCallback(() => onSelect(id), [onSelect, id]);
+  const handleContextMenu = useCallback(
+    (e: React.MouseEvent) => onContextMenu(e, id),
+    [onContextMenu, id]
+  );
 
-  useEffect(() => {
-    if (isSelected) {
-      ref.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
-    }
-  }, [isSelected]);
-
-  const folder =
-    showFolderPrefix && id.includes("/")
-      ? id.substring(0, id.lastIndexOf("/"))
-      : null;
-  const displayPreview = folder
-    ? preview
-      ? `${folder}/ · ${preview}`
-      : `${folder}/`
+  const folder = id.includes('/') ? id.substring(0, id.lastIndexOf('/')) : null;
+  const displayPreview = folder && showFolderPrefix
+    ? preview ? `${folder}/ · ${preview}` : `${folder}/`
     : preview;
 
   return (
-    <div
-      ref={ref}
-      style={depth != null ? { paddingLeft: `${depth * 12}px` } : undefined}
-    >
-      <ListItem
-        title={cleanTitle(title)}
-        subtitle={displayPreview}
-        meta={formatDate(modified)}
-        isSelected={isSelected}
-        isPinned={isPinned}
-        onClick={handleClick}
-      />
-    </div>
+    <ListItem
+      title={cleanTitle(title)}
+      subtitle={displayPreview}
+      meta={formatDate(modified)}
+      isSelected={isSelected}
+      isPinned={isPinned}
+      onClick={handleClick}
+      onContextMenu={handleContextMenu}
+    />
   );
 });
 
-// Note item wrapped with Radix context menu
-interface NoteItemWithMenuProps {
+interface DisplayItem {
   id: string;
   title: string;
-  preview?: string;
+  preview: string;
   modified: number;
-  isSelected: boolean;
-  isPinned: boolean;
-  onSelect: (id: string) => void;
-  onPin: (id: string) => Promise<void>;
-  onUnpin: (id: string) => Promise<void>;
-  onDuplicate: (id: string) => void;
-  onDelete: (id: string) => void;
-  onRefreshSettings: () => Promise<void> | void;
 }
 
-const NoteItemWithMenu = memo(function NoteItemWithMenu({
-  id,
-  title,
-  preview,
-  modified,
-  isSelected,
-  isPinned,
-  onSelect,
-  onPin,
-  onUnpin,
-  onDuplicate,
-  onDelete,
-  onRefreshSettings,
-}: NoteItemWithMenuProps) {
-  const handlePin = useCallback(async () => {
-    try {
-      await (isPinned ? onUnpin(id) : onPin(id));
-      await onRefreshSettings();
-    } catch (error) {
-      console.error("Failed to pin/unpin note:", error);
-    }
-  }, [id, isPinned, onPin, onUnpin, onRefreshSettings]);
+interface FolderTreeNode {
+  name: string;
+  path: string;
+  children: Map<string, FolderTreeNode>;
+  notes: DisplayItem[];
+}
 
-  const handleCopyFilepath = useCallback(async () => {
-    try {
-      const folder = await notesService.getNotesFolder();
-      if (folder) {
-        const filepath = `${folder}/${id}.md`;
-        await invoke("copy_to_clipboard", { text: filepath });
+function buildFolderTree(items: DisplayItem[], folderPaths: string[]): FolderTreeNode {
+  const root: FolderTreeNode = {
+    name: "",
+    path: "",
+    children: new Map(),
+    notes: [],
+  };
+
+  const ensureFolder = (folderPath: string) => {
+    if (!folderPath) return;
+    const parts = folderPath.split("/").filter(Boolean);
+    let current = root;
+    let currentPath = "";
+
+    for (const name of parts) {
+      currentPath = currentPath ? `${currentPath}/${name}` : name;
+      let child = current.children.get(name);
+      if (!child) {
+        child = {
+          name,
+          path: currentPath,
+          children: new Map(),
+          notes: [],
+        };
+        current.children.set(name, child);
       }
-    } catch (error) {
-      console.error("Failed to copy filepath:", error);
+      current = child;
     }
-  }, [id]);
+  };
 
-  return (
-    <ContextMenu.Root>
-      <ContextMenu.Trigger asChild>
-        <div>
-          <NoteItem
-            id={id}
-            title={title}
-            preview={preview}
-            modified={modified}
-            isSelected={isSelected}
-            isPinned={isPinned}
-            onSelect={onSelect}
-          />
-        </div>
-      </ContextMenu.Trigger>
-      <ContextMenu.Portal>
-        <ContextMenu.Content className="min-w-44 bg-bg border border-border rounded-md shadow-lg py-1 z-50">
-          <ContextMenu.Item className={menuItemClass} onSelect={handlePin}>
-            <PinIcon className="w-4 h-4 stroke-[1.6]" />
-            {isPinned ? "Unpin" : "Pin"}
-          </ContextMenu.Item>
-          <ContextMenu.Item
-            className={menuItemClass}
-            onSelect={() => onDuplicate(id)}
-          >
-            <CopyIcon className="w-4 h-4 stroke-[1.6]" />
-            Duplicate
-          </ContextMenu.Item>
-          <ContextMenu.Item
-            className={menuItemClass}
-            onSelect={handleCopyFilepath}
-          >
-            <CopyIcon className="w-4 h-4 stroke-[1.6]" />
-            Copy Filepath
-          </ContextMenu.Item>
-          <ContextMenu.Separator className={menuSeparatorClass} />
-          <ContextMenu.Item
-            className={
-              menuItemClass +
-              " text-red-500 hover:text-red-500 focus:text-red-500"
-            }
-            onSelect={() => onDelete(id)}
-          >
-            <TrashIcon className="w-4 h-4 stroke-[1.6]" />
-            Delete
-          </ContextMenu.Item>
-        </ContextMenu.Content>
-      </ContextMenu.Portal>
-    </ContextMenu.Root>
-  );
-});
+  for (const folderPath of folderPaths) {
+    ensureFolder(folderPath);
+  }
+
+  for (const item of items) {
+    const parts = item.id.split("/");
+    if (parts.length === 1) {
+      root.notes.push(item);
+      continue;
+    }
+
+    const folderPath = parts.slice(0, -1).join("/");
+    ensureFolder(folderPath);
+
+    let current = root;
+    for (let i = 0; i < parts.length - 1; i += 1) {
+      const name = parts[i];
+      const child = current.children.get(name);
+      if (!child) break;
+      current = child;
+    }
+
+    current.notes.push(item);
+  }
+
+  return root;
+}
 
 interface NoteListProps {
-  multiSelectedNoteIds: Set<string>;
-  setMultiSelectedNoteIds: React.Dispatch<React.SetStateAction<Set<string>>>;
-  lastClickedNoteId: string | null;
-  setLastClickedNoteId: React.Dispatch<React.SetStateAction<string | null>>;
+  focusSignal?: number;
+  toggleAllFoldersSignal?: number;
+  onFolderTreeStateChange?: (allExpanded: boolean) => void;
+  createRootFolderSignal?: number;
 }
 
 export function NoteList({
-  multiSelectedNoteIds,
-  setMultiSelectedNoteIds,
-  lastClickedNoteId,
-  setLastClickedNoteId,
+  focusSignal = 0,
+  toggleAllFoldersSignal = 0,
+  onFolderTreeStateChange,
+  createRootFolderSignal = 0,
 }: NoteListProps) {
   const {
     notes,
+    folders,
+    notesFolder,
+    pinnedNoteIds,
     selectedNoteId,
-    selectNote,
-    deleteNote,
-    duplicateNote,
-    pinNote,
-    unpinNote,
     isLoading,
     searchQuery,
     searchResults,
-  } = useNotes();
+  } = useNotesData();
+  const {
+    selectNote,
+    deleteNote,
+    duplicateNote,
+    togglePinNote,
+    createFolder,
+    createNoteInFolder,
+  } =
+    useNotesActions();
 
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [noteToDelete, setNoteToDelete] = useState<string | null>(null);
-  const [settings, setSettings] = useState<Settings | null>(null);
+  const [createFolderDialogOpen, setCreateFolderDialogOpen] = useState(false);
+  const [createFolderName, setCreateFolderName] = useState("");
+  const [createFolderParentPath, setCreateFolderParentPath] = useState<string | null>(null);
+  const [createFolderError, setCreateFolderError] = useState<string | null>(null);
+  const [isCreatingFolder, setIsCreatingFolder] = useState(false);
+  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
   const containerRef = useRef<HTMLDivElement>(null);
-
-  // Load settings when notes change
-  useEffect(() => {
-    notesService
-      .getSettings()
-      .then(setSettings)
-      .catch((error) => {
-        console.error("Failed to load settings:", error);
-      });
-  }, [notes]);
+  const lastHandledToggleSignalRef = useRef(0);
+  const lastHandledCreateRootSignalRef = useRef(0);
 
   // Calculate pinned IDs set for efficient lookup
   const pinnedIds = useMemo(
-    () => new Set(settings?.pinnedNoteIds || []),
-    [settings]
+    () => new Set(pinnedNoteIds),
+    [pinnedNoteIds]
   );
 
   const handleDeleteConfirm = useCallback(async () => {
@@ -285,127 +254,277 @@ export function NoteList({
     }
   }, [noteToDelete, deleteNote]);
 
-  const openDeleteDialogForNote = useCallback((noteId: string) => {
-    setNoteToDelete(noteId);
-    setDeleteDialogOpen(true);
+  const handleContextMenu = useCallback(
+    async (e: React.MouseEvent, noteId: string) => {
+      e.preventDefault();
+      const isPinned = pinnedIds.has(noteId);
+
+      const menu = await Menu.new({
+        items: [
+          await MenuItem.new({
+            text: isPinned ? "Unpin" : "Pin",
+            action: async () => {
+              try {
+                await togglePinNote(noteId);
+              } catch (error) {
+                console.error("Failed to pin/unpin note:", error);
+              }
+            },
+          }),
+          await MenuItem.new({
+            text: "Duplicate",
+            action: () => duplicateNote(noteId),
+          }),
+          await MenuItem.new({
+            text: "Copy Filepath",
+            action: async () => {
+              try {
+                if (notesFolder) {
+                  const filepath = `${notesFolder}/${noteId}.md`;
+                  await invoke("copy_to_clipboard", { text: filepath });
+                }
+              } catch (error) {
+                console.error("Failed to copy filepath:", error);
+              }
+            },
+          }),
+          await PredefinedMenuItem.new({ item: "Separator" }),
+          await MenuItem.new({
+            text: "Delete",
+            action: () => {
+              setNoteToDelete(noteId);
+              setDeleteDialogOpen(true);
+            },
+          }),
+        ],
+      });
+
+      await menu.popup();
+    },
+    [pinnedIds, togglePinNote, duplicateNote, notesFolder]
+  );
+
+  const openCreateFolderDialog = useCallback((parentPath: string | null) => {
+    setCreateFolderParentPath(parentPath);
+    setCreateFolderName("");
+    setCreateFolderError(null);
+    setCreateFolderDialogOpen(true);
   }, []);
 
-  const refreshSettings = useCallback(() => {
-    notesService.getSettings().then(setSettings);
-  }, []);
-
-  // Memoize display items to prevent recalculation on every render
-  const displayItems = useMemo(() => {
-    if (searchQuery.trim()) {
-      return searchResults.map((r) => ({
-        id: r.id,
-        title: r.title,
-        preview: r.preview,
-        modified: r.modified,
-      }));
+  const handleCreateFolderConfirm = useCallback(async () => {
+    const trimmed = createFolderName.trim();
+    if (!trimmed) {
+      setCreateFolderError("Folder name is required");
+      return;
     }
-    return notes;
-  }, [searchQuery, searchResults, notes]);
 
-  // Listen for focus request from editor (when Escape is pressed)
-  useEffect(() => {
-    const handleFocusNoteList = () => {
-      containerRef.current?.focus();
+    try {
+      setIsCreatingFolder(true);
+      setCreateFolderError(null);
+      await createFolder(createFolderParentPath, trimmed);
+
+      const createdPath = createFolderParentPath
+        ? `${createFolderParentPath}/${trimmed}`
+        : trimmed;
+      setExpandedFolders((prev) => {
+        const next = new Set(prev);
+        if (createFolderParentPath) {
+          next.add(createFolderParentPath);
+        }
+        next.add(createdPath);
+        return next;
+      });
+
+      setCreateFolderDialogOpen(false);
+      setCreateFolderName("");
+      setCreateFolderParentPath(null);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Failed to create folder";
+      setCreateFolderError(message);
+      toast.error(message);
+    } finally {
+      setIsCreatingFolder(false);
+    }
+  }, [createFolder, createFolderName, createFolderParentPath]);
+
+  const handleFolderContextMenu = useCallback(
+    async (e: React.MouseEvent, folderPath: string) => {
+      e.preventDefault();
+
+      const menu = await Menu.new({
+        items: [
+          await MenuItem.new({
+            text: "New Note Here",
+            action: async () => {
+              try {
+                await createNoteInFolder(folderPath);
+                setExpandedFolders((prev) => {
+                  const next = new Set(prev);
+                  next.add(folderPath);
+                  return next;
+                });
+              } catch (error) {
+                const message =
+                  error instanceof Error
+                    ? error.message
+                    : "Failed to create note in folder";
+                toast.error(message);
+              }
+            },
+          }),
+          await PredefinedMenuItem.new({ item: "Separator" }),
+          await MenuItem.new({
+            text: "New Folder Here",
+            action: () => openCreateFolderDialog(folderPath),
+          }),
+        ],
+      });
+
+      await menu.popup();
+    },
+    [createNoteInFolder, openCreateFolderDialog]
+  );
+
+  const displayItems = useMemo(
+    () => getDisplayItems(notes, searchQuery, searchResults),
+    [notes, searchQuery, searchResults],
+  );
+
+  const folderTree = useMemo(
+    () => buildFolderTree(displayItems, folders),
+    [displayItems, folders]
+  );
+
+  const allFolderPaths = useMemo(() => {
+    const paths: string[] = [];
+    const walk = (node: FolderTreeNode) => {
+      for (const child of node.children.values()) {
+        paths.push(child.path);
+        walk(child);
+      }
     };
+    walk(folderTree);
+    return paths;
+  }, [folderTree]);
 
-    window.addEventListener("focus-note-list", handleFocusNoteList);
-    return () =>
-      window.removeEventListener("focus-note-list", handleFocusNoteList);
+  useEffect(() => {
+    if (!selectedNoteId || !selectedNoteId.includes("/")) return;
+
+    const parts = selectedNoteId.split("/");
+    const ancestors = new Set<string>();
+    let path = "";
+    for (let i = 0; i < parts.length - 1; i += 1) {
+      path = path ? `${path}/${parts[i]}` : parts[i];
+      ancestors.add(path);
+    }
+
+    setExpandedFolders((prev) => {
+      let changed = false;
+      const next = new Set(prev);
+      for (const ancestor of ancestors) {
+        if (!next.has(ancestor)) {
+          next.add(ancestor);
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [selectedNoteId]);
+
+  const toggleFolder = useCallback((path: string) => {
+    setExpandedFolders((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) {
+        next.delete(path);
+      } else {
+        next.add(path);
+      }
+      return next;
+    });
   }, []);
 
+  const toggleAllFolders = useCallback(() => {
+    if (allFolderPaths.length === 0) return;
+    setExpandedFolders((prev) => {
+      const allExpanded = allFolderPaths.every((path) => prev.has(path));
+      return allExpanded ? new Set<string>() : new Set(allFolderPaths);
+    });
+  }, [allFolderPaths]);
+
   useEffect(() => {
-    const handleRequestDelete = (event: Event) => {
-      const customEvent = event as CustomEvent<string>;
-      if (!customEvent.detail) return;
-      openDeleteDialogForNote(customEvent.detail);
-    };
+    const allExpanded =
+      allFolderPaths.length > 0 &&
+      allFolderPaths.every((path) => expandedFolders.has(path));
+    onFolderTreeStateChange?.(allExpanded);
+  }, [expandedFolders, allFolderPaths, onFolderTreeStateChange]);
 
-    window.addEventListener("request-delete-note", handleRequestDelete);
-    return () =>
-      window.removeEventListener("request-delete-note", handleRequestDelete);
-  }, [openDeleteDialogForNote]);
+  useEffect(() => {
+    if (focusSignal === 0) return;
+    containerRef.current?.focus();
+  }, [focusSignal]);
 
-  const foldersEnabled = settings?.foldersEnabled === true;
-  const isSearching = searchQuery.trim().length > 0;
+  useEffect(() => {
+    if (
+      toggleAllFoldersSignal === 0 ||
+      toggleAllFoldersSignal === lastHandledToggleSignalRef.current
+    ) {
+      return;
+    }
+    lastHandledToggleSignalRef.current = toggleAllFoldersSignal;
+    toggleAllFolders();
+  }, [toggleAllFoldersSignal, toggleAllFolders]);
 
-  if (isLoading && notes.length === 0) {
-    return (
-      <div className="p-4 text-center text-text-muted select-none">
-        Loading...
-      </div>
+  useEffect(() => {
+    if (
+      createRootFolderSignal === 0 ||
+      createRootFolderSignal === lastHandledCreateRootSignalRef.current
+    ) {
+      return;
+    }
+    lastHandledCreateRootSignalRef.current = createRootFolderSignal;
+    openCreateFolderDialog(null);
+  }, [createRootFolderSignal, openCreateFolderDialog]);
+
+  const renderFolderTree = (node: FolderTreeNode, depth: number): ReactNode[] => {
+    const rows: ReactNode[] = [];
+
+    const childFolders = Array.from(node.children.values()).sort((a, b) =>
+      a.name.localeCompare(b.name)
     );
-  }
 
-  if (isSearching && displayItems.length === 0) {
-    return (
-      <div className="p-4 text-center text-sm text-text-muted select-none">
-        No results found
-      </div>
-    );
-  }
-
-  if (displayItems.length === 0) {
-    return (
-      <div className="p-4 text-center text-sm text-text-muted select-none">
-        No notes yet
-      </div>
-    );
-  }
-
-  // Show folder tree view when folders enabled and not searching
-  if (foldersEnabled && !isSearching) {
-    return (
-      <>
-        <FolderTreeView
-          pinnedIds={pinnedIds}
-          settings={settings}
-          multiSelectedNoteIds={multiSelectedNoteIds}
-          setMultiSelectedNoteIds={setMultiSelectedNoteIds}
-          lastClickedNoteId={lastClickedNoteId}
-          setLastClickedNoteId={setLastClickedNoteId}
-        />
-
-        {/* Delete confirmation dialog */}
-        <AlertDialog
-          open={deleteDialogOpen}
-          onOpenChange={setDeleteDialogOpen}
+    for (const folder of childFolders) {
+      const isExpanded = expandedFolders.has(folder.path);
+      rows.push(
+        <button
+          key={`folder-${folder.path}`}
+          onClick={() => toggleFolder(folder.path)}
+          onContextMenu={(e) => handleFolderContextMenu(e, folder.path)}
+          className="w-full flex items-center gap-1.5 py-1.5 pr-2 rounded-md hover:bg-bg-muted text-text-muted hover:text-text transition-colors"
+          style={{ paddingLeft: `${8 + depth * 14}px` }}
         >
-          <AlertDialogContent>
-            <AlertDialogHeader>
-              <AlertDialogTitle>Delete note?</AlertDialogTitle>
-              <AlertDialogDescription>
-                This will permanently delete the note and all its content. This
-                action cannot be undone.
-              </AlertDialogDescription>
-            </AlertDialogHeader>
-            <AlertDialogFooter>
-              <AlertDialogCancel>Cancel</AlertDialogCancel>
-              <AlertDialogAction onClick={handleDeleteConfirm}>
-                Delete
-              </AlertDialogAction>
-            </AlertDialogFooter>
-          </AlertDialogContent>
-        </AlertDialog>
-      </>
-    );
-  }
+          {isExpanded ? (
+            <ChevronDownIcon className="w-3.5 h-3.5 stroke-[1.9] shrink-0" />
+          ) : (
+            <ChevronRightIcon className="w-3.5 h-3.5 stroke-[1.9] shrink-0" />
+          )}
+          <FolderIcon className="w-3.75 h-3.75 stroke-[1.9] shrink-0" />
+          <span className="text-xs font-medium truncate">{folder.name}</span>
+        </button>
+      );
 
-  return (
-    <>
-      <div
-        ref={containerRef}
-        tabIndex={0}
-        data-note-list
-        className="group/notelist flex flex-col gap-1 p-1.5 outline-none"
-      >
-        {displayItems.map((item) => (
-          <NoteItemWithMenu
-            key={item.id}
+      if (isExpanded) {
+        rows.push(...renderFolderTree(folder, depth + 1));
+      }
+    }
+
+    for (const item of node.notes) {
+      rows.push(
+        <div
+          key={item.id}
+          style={{ paddingLeft: `${depth > 0 ? 8 + depth * 14 : 0}px` }}
+        >
+          <NoteItem
             id={item.id}
             title={item.title}
             preview={item.preview}
@@ -413,14 +532,56 @@ export function NoteList({
             isSelected={selectedNoteId === item.id}
             isPinned={pinnedIds.has(item.id)}
             onSelect={selectNote}
-            onPin={pinNote}
-            onUnpin={unpinNote}
-            onDuplicate={duplicateNote}
-            onDelete={openDeleteDialogForNote}
-            onRefreshSettings={refreshSettings}
+            onContextMenu={handleContextMenu}
+            showFolderPrefix={false}
           />
-        ))}
+        </div>
+      );
+    }
+
+    return rows;
+  };
+
+  let content: ReactNode;
+  if (isLoading && notes.length === 0) {
+    content = <div className="p-4 text-center text-text-muted select-none">Loading...</div>;
+  } else if (searchQuery.trim() && displayItems.length === 0) {
+    content = (
+      <div className="p-4 text-center text-sm text-text-muted select-none">
+        No results found
       </div>
+    );
+  } else if (displayItems.length === 0 && folders.length === 0) {
+    content = <div className="p-4 text-center text-sm text-text-muted select-none">No notes yet</div>;
+  } else {
+    content = (
+      <div
+        ref={containerRef}
+        tabIndex={0}
+        className="flex flex-col gap-1 p-1.5 outline-none"
+      >
+        {searchQuery.trim()
+          ? displayItems.map((item) => (
+              <NoteItem
+                key={item.id}
+                id={item.id}
+                title={item.title}
+                preview={item.preview}
+                modified={item.modified}
+                isSelected={selectedNoteId === item.id}
+                isPinned={pinnedIds.has(item.id)}
+                onSelect={selectNote}
+                onContextMenu={handleContextMenu}
+              />
+            ))
+          : renderFolderTree(folderTree, 0)}
+      </div>
+    );
+  }
+
+  return (
+    <>
+      {content}
 
       {/* Delete confirmation dialog */}
       <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
@@ -436,6 +597,64 @@ export function NoteList({
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction onClick={handleDeleteConfirm}>
               Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog
+        open={createFolderDialogOpen}
+        onOpenChange={(open) => {
+          setCreateFolderDialogOpen(open);
+          if (!open) {
+            setCreateFolderError(null);
+            setCreateFolderName("");
+            setCreateFolderParentPath(null);
+            setIsCreatingFolder(false);
+          }
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>New folder</AlertDialogTitle>
+            <AlertDialogDescription>
+              {createFolderParentPath
+                ? `Create a folder inside ${createFolderParentPath}`
+                : "Create a folder at the root of your notes"}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="space-y-2">
+            <Input
+              value={createFolderName}
+              onChange={(e) => {
+                setCreateFolderName(e.target.value);
+                if (createFolderError) {
+                  setCreateFolderError(null);
+                }
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  void handleCreateFolderConfirm();
+                }
+              }}
+              placeholder="Folder name"
+              autoFocus
+            />
+            {createFolderError && (
+              <p className="text-xs text-red-500">{createFolderError}</p>
+            )}
+          </div>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={isCreatingFolder}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(e) => {
+                e.preventDefault();
+                void handleCreateFolderConfirm();
+              }}
+              disabled={isCreatingFolder}
+            >
+              {isCreatingFolder ? "Creating..." : "Create"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
